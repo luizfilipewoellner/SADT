@@ -263,6 +263,7 @@ button{
 
   <div class="footer-actions">
     <button class="btn-clear" id="clearBtn" type="button">Limpar tudo</button>
+    <button class="btn-add" id="printBtn" type="button">Imprimir</button>
     <button class="btn-primary" id="genBtn" type="button">Gerar guia em PDF</button>
   </div>
   <div class="status" id="status"></div>
@@ -414,165 +415,172 @@ function wrapText(text, maxCharsPerLine){
   return lines;
 }
 
+async function buildFilledPdf(){
+  const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  const bytes = b64ToBytes(PDF_B64);
+  const pdfDoc = await PDFDocument.load(bytes);
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const H = pdfDoc.getPages()[0].getHeight();
+
+  const v = id => (document.getElementById(id) ? document.getElementById(id).value : '');
+
+  function put(pg, x, topY, text, size){
+    if(!text) return;
+    size = size || 7.5;
+    pg.drawText(String(text), { x: x, y: H - topY, size: size, font: font, color: rgb(0,0,0) });
+  }
+
+  function putComb(pg, x0, boxW, n, topY, text, size){
+    if(!text) return;
+    size = size || 7.5;
+    const chars = String(text).replace(/\s+/g,'').split('');
+    const yy = H - topY;
+    for(let i=0;i<n && i<chars.length;i++){
+      const ch = chars[i];
+      const w = font.widthOfTextAtSize(ch, size);
+      const cx = x0 + i*boxW + (boxW - w)/2;
+      pg.drawText(ch, { x: cx, y: yy, size: size, font: font, color: rgb(0,0,0) });
+    }
+  }
+
+  function putDateComb(pg, dGroup, mGroup, yGroup, topY, iso, size){
+    if(!iso) return;
+    const [yy_, mm_, dd_] = iso.split('-');
+    putComb(pg, dGroup.x0, dGroup.w, dGroup.n, topY, dd_, size);
+    putComb(pg, mGroup.x0, mGroup.w, mGroup.n, topY, mm_, size);
+    putComb(pg, yGroup.x0, yGroup.w, yGroup.n, topY, yy_, size);
+  }
+
+  async function drawLogo(pg){
+    try {
+      const convenioVal = document.getElementById('convenio').value;
+      const logoDataUri = LOGOS_CONVENIO[convenioVal];
+      if (logoDataUri) {
+        const isPng = logoDataUri.indexOf('data:image/png') === 0;
+        const base64Data = logoDataUri.split(',')[1];
+        const imgBytes = b64ToBytes(base64Data);
+        const logoImg = isPng ? await pdfDoc.embedPng(imgBytes) : await pdfDoc.embedJpg(imgBytes);
+        // Caixa do "Logo da Empresa" no modelo fica nesse canto (x~48, topo~14);
+        // reduzida um pouco para não encostar na linha "1 - Registro ANS" (topo ~52.9)
+        // com logos de proporção mais larga/alta (AMASPU, Unimed Curitiba, Amil, Bradesco, Fusex, GEAP etc.)
+        const boxX = 48, boxW = 100, boxTop = 13.9, boxH = 26;
+        const scale = Math.min(boxW / logoImg.width, boxH / logoImg.height, 1);
+        const w = logoImg.width * scale;
+        const h = logoImg.height * scale;
+        const x = boxX + (boxW - w) / 2;
+        const y = (H - boxTop - boxH) + (boxH - h) / 2;
+        pg.drawImage(logoImg, { x: x, y: y, width: w, height: h });
+      }
+    } catch (logoErr) {
+      console.error('Falha ao inserir logo do convênio no PDF:', logoErr);
+    }
+  }
+
+  // Campos que se repetem em toda página (cabeçalho, beneficiário, solicitante, solicitação)
+  function drawCommonFields(pg){
+    // === Cabeçalho ===
+    putComb(pg, 28.9, 10.26, 6, 63, v('ans').replace(/\D/g,''));
+
+    // === Dados do Beneficiário ===
+    putComb(pg, 30.3, 9.09, 20, 116, v('f8'));
+    put(pg, 325, 119, v('f10'), 8);
+    putComb(pg, 776.1, 11.46, 1, 116, v('f12'), 7);
+
+    // === Dados do Contratado Solicitante ===
+    put(pg, 32, 172, "Luiz Filipe Alkamin Woellner", 8);
+    putComb(pg, 266.9, 10.76, 2, 175, "06", 5.5);
+    putComb(pg, 305.8, 10.12, 15, 174, "42978", 7);
+    putComb(pg, 466.9, 10.70, 2, 174, "PR", 7);
+    putComb(pg, 496.3, 10.22, 6, 174, "225203", 7);
+
+    // === Dados da Solicitação ===
+    putComb(pg, 43.4, 11.46, 1, 206, v('f21'), 6);
+    putDateComb(pg, {x0:75.5,w:10.68,n:2}, {x0:101.1,w:10.77,n:2}, {x0:126.9,w:10.37,n:4}, 204, v('f22'));
+    const indicacaoLines = wrapText(v('f23'), 115);
+    indicacaoLines.slice(0,1).forEach((line,i)=>{
+      put(pg, 178, 206 + i*9, line, 7);
+    });
+
+    // === Observação / Justificativa (58) ===
+    const obsLines = wrapText(v('f58'), 120);
+    obsLines.slice(0,3).forEach((line,i)=>{
+      put(pg, 32, 523 + i*10, line, 7);
+    });
+  }
+
+  // === Procedimentos ou Itens Assistenciais Solicitados (24-28) ===
+  // Reúne todos os procedimentos preenchidos
+  const allProcs = [];
+  for(let i=1;i<=PROC_MAX;i++){
+    const codigo = v(`pr${i}_codigo`);
+    const desc = v(`pr${i}_desc`);
+    const solic = v(`pr${i}_solic`);
+    if(!codigo && !desc) continue;
+    allProcs.push({ codigo, desc, solic });
+  }
+
+  // A guia impressa só tem 5 linhas nesta tabela por página;
+  // se houver mais procedimentos, geramos páginas extras (cópias do modelo).
+  const PROCS_PER_PAGE = 5;
+  const procRowTops = [222, 232.5, 243, 253.5, 264];
+  const totalPages = Math.max(1, Math.ceil(allProcs.length / PROCS_PER_PAGE));
+
+  const pages = [pdfDoc.getPages()[0]];
+  for(let p=1;p<totalPages;p++){
+    const [copied] = await pdfDoc.copyPages(pdfDoc, [0]);
+    pdfDoc.addPage(copied);
+    pages.push(copied);
+  }
+
+  for(let p=0;p<totalPages;p++){
+    const pg = pages[p];
+    await drawLogo(pg);
+    drawCommonFields(pg);
+
+    const chunk = allProcs.slice(p*PROCS_PER_PAGE, p*PROCS_PER_PAGE + PROCS_PER_PAGE);
+    chunk.forEach((proc, idxInPage)=>{
+      const rowTopBase = procRowTops[idxInPage];
+      // A 1ª linha de cada página fica logo abaixo do cabeçalho da tabela, que quebra em
+      // 2 linhas ("...do Procedimento" / "ou Item Assistencial") — o espaço ali é bem mais
+      // apertado do que nas demais linhas, por isso usa fonte um pouco menor e fica um
+      // pouco mais baixa dentro da caixinha.
+      const isFirstRow = (idxInPage === 0);
+      const smallSize = isFirstRow ? 6.5 : 7;
+      const descSize = isFirstRow ? 6.5 : 8.5;
+      const rowTop = isFirstRow ? 226.5 : rowTopBase;
+      putComb(pg, 62.0, 10.28, 10, rowTop, proc.codigo, smallSize);
+      put(pg, 169, rowTop, proc.desc.slice(0,90), descSize);
+      putComb(pg, 698.9, 10.60, 3, rowTop, proc.solic, smallSize);
+    });
+
+    if(totalPages > 1){
+      put(pg, 12, 592, `Página ${p+1}/${totalPages}`, 6.5);
+    }
+  }
+
+  const outBytes = await pdfDoc.save();
+
+  const nomePaciente = (v('f10') || 'Paciente').trim();
+  const hoje = new Date();
+  const dd = String(hoje.getDate()).padStart(2,'0');
+  const mm = String(hoje.getMonth()+1).padStart(2,'0');
+  const yyyy = hoje.getFullYear();
+  const dataStr = `${dd}-${mm}-${yyyy}`;
+  const nomeArquivo = `SADT ${nomePaciente} ${dataStr}`.replace(/[\\/:*?"<>|]+/g,'').replace(/\s+/g,' ').trim();
+
+  return { bytes: outBytes, totalPages, filename: `${nomeArquivo}.pdf` };
+}
+
 async function generatePdf(){
   const status = document.getElementById('status');
   status.textContent = 'Gerando PDF...';
   try{
-    const { PDFDocument, StandardFonts, rgb } = PDFLib;
-    const bytes = b64ToBytes(PDF_B64);
-    const pdfDoc = await PDFDocument.load(bytes);
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const H = pdfDoc.getPages()[0].getHeight();
-
-    const v = id => (document.getElementById(id) ? document.getElementById(id).value : '');
-
-    function put(pg, x, topY, text, size){
-      if(!text) return;
-      size = size || 7.5;
-      pg.drawText(String(text), { x: x, y: H - topY, size: size, font: font, color: rgb(0,0,0) });
-    }
-
-    function putComb(pg, x0, boxW, n, topY, text, size){
-      if(!text) return;
-      size = size || 7.5;
-      const chars = String(text).replace(/\s+/g,'').split('');
-      const yy = H - topY;
-      for(let i=0;i<n && i<chars.length;i++){
-        const ch = chars[i];
-        const w = font.widthOfTextAtSize(ch, size);
-        const cx = x0 + i*boxW + (boxW - w)/2;
-        pg.drawText(ch, { x: cx, y: yy, size: size, font: font, color: rgb(0,0,0) });
-      }
-    }
-
-    function putDateComb(pg, dGroup, mGroup, yGroup, topY, iso, size){
-      if(!iso) return;
-      const [yy_, mm_, dd_] = iso.split('-');
-      putComb(pg, dGroup.x0, dGroup.w, dGroup.n, topY, dd_, size);
-      putComb(pg, mGroup.x0, mGroup.w, mGroup.n, topY, mm_, size);
-      putComb(pg, yGroup.x0, yGroup.w, yGroup.n, topY, yy_, size);
-    }
-
-    async function drawLogo(pg){
-      try {
-        const convenioVal = document.getElementById('convenio').value;
-        const logoDataUri = LOGOS_CONVENIO[convenioVal];
-        if (logoDataUri) {
-          const isPng = logoDataUri.indexOf('data:image/png') === 0;
-          const base64Data = logoDataUri.split(',')[1];
-          const imgBytes = b64ToBytes(base64Data);
-          const logoImg = isPng ? await pdfDoc.embedPng(imgBytes) : await pdfDoc.embedJpg(imgBytes);
-          // Caixa do "Logo da Empresa" no modelo fica nesse canto (x~48, topo~14);
-          // reduzida um pouco para não encostar na linha "1 - Registro ANS" (topo ~52.9)
-          // com logos de proporção mais larga/alta (AMASPU, Unimed Curitiba, Amil, Bradesco, Fusex, GEAP etc.)
-          const boxX = 48, boxW = 100, boxTop = 13.9, boxH = 26;
-          const scale = Math.min(boxW / logoImg.width, boxH / logoImg.height, 1);
-          const w = logoImg.width * scale;
-          const h = logoImg.height * scale;
-          const x = boxX + (boxW - w) / 2;
-          const y = (H - boxTop - boxH) + (boxH - h) / 2;
-          pg.drawImage(logoImg, { x: x, y: y, width: w, height: h });
-        }
-      } catch (logoErr) {
-        console.error('Falha ao inserir logo do convênio no PDF:', logoErr);
-      }
-    }
-
-    // Campos que se repetem em toda página (cabeçalho, beneficiário, solicitante, solicitação)
-    function drawCommonFields(pg){
-      // === Cabeçalho ===
-      putComb(pg, 28.9, 10.26, 6, 63, v('ans').replace(/\D/g,''));
-
-      // === Dados do Beneficiário ===
-      putComb(pg, 30.3, 9.09, 20, 116, v('f8'));
-      put(pg, 325, 119, v('f10'), 8);
-      putComb(pg, 776.1, 11.46, 1, 116, v('f12'), 7);
-
-      // === Dados do Contratado Solicitante ===
-      put(pg, 32, 172, "Luiz Filipe Alkamin Woellner", 8);
-      putComb(pg, 266.9, 10.76, 2, 175, "06", 5.5);
-      putComb(pg, 305.8, 10.12, 15, 174, "42978", 7);
-      putComb(pg, 466.9, 10.70, 2, 174, "PR", 7);
-      putComb(pg, 496.3, 10.22, 6, 174, "225203", 7);
-
-      // === Dados da Solicitação ===
-      putComb(pg, 43.4, 11.46, 1, 206, v('f21'), 6);
-      putDateComb(pg, {x0:75.5,w:10.68,n:2}, {x0:101.1,w:10.77,n:2}, {x0:126.9,w:10.37,n:4}, 204, v('f22'));
-      const indicacaoLines = wrapText(v('f23'), 115);
-      indicacaoLines.slice(0,1).forEach((line,i)=>{
-        put(pg, 178, 206 + i*9, line, 7);
-      });
-
-      // === Observação / Justificativa (58) ===
-      const obsLines = wrapText(v('f58'), 120);
-      obsLines.slice(0,3).forEach((line,i)=>{
-        put(pg, 32, 523 + i*10, line, 7);
-      });
-    }
-
-    // === Procedimentos ou Itens Assistenciais Solicitados (24-28) ===
-    // Reúne todos os procedimentos preenchidos
-    const allProcs = [];
-    for(let i=1;i<=PROC_MAX;i++){
-      const codigo = v(`pr${i}_codigo`);
-      const desc = v(`pr${i}_desc`);
-      const solic = v(`pr${i}_solic`);
-      if(!codigo && !desc) continue;
-      allProcs.push({ codigo, desc, solic });
-    }
-
-    // A guia impressa só tem 5 linhas nesta tabela por página;
-    // se houver mais procedimentos, geramos páginas extras (cópias do modelo).
-    const PROCS_PER_PAGE = 5;
-    const procRowTops = [222, 232.5, 243, 253.5, 264];
-    const totalPages = Math.max(1, Math.ceil(allProcs.length / PROCS_PER_PAGE));
-
-    const pages = [pdfDoc.getPages()[0]];
-    for(let p=1;p<totalPages;p++){
-      const [copied] = await pdfDoc.copyPages(pdfDoc, [0]);
-      pdfDoc.addPage(copied);
-      pages.push(copied);
-    }
-
-    for(let p=0;p<totalPages;p++){
-      const pg = pages[p];
-      await drawLogo(pg);
-      drawCommonFields(pg);
-
-      const chunk = allProcs.slice(p*PROCS_PER_PAGE, p*PROCS_PER_PAGE + PROCS_PER_PAGE);
-      chunk.forEach((proc, idxInPage)=>{
-        const rowTopBase = procRowTops[idxInPage];
-        // A 1ª linha de cada página fica logo abaixo do cabeçalho da tabela, que quebra em
-        // 2 linhas ("...do Procedimento" / "ou Item Assistencial") — o espaço ali é bem mais
-        // apertado do que nas demais linhas, por isso usa fonte um pouco menor e fica um
-        // pouco mais baixa dentro da caixinha.
-        const isFirstRow = (idxInPage === 0);
-        const smallSize = isFirstRow ? 6.5 : 7;
-        const descSize = isFirstRow ? 6.5 : 8.5;
-        const rowTop = isFirstRow ? 226.5 : rowTopBase;
-        putComb(pg, 62.0, 10.28, 10, rowTop, proc.codigo, smallSize);
-        put(pg, 169, rowTop, proc.desc.slice(0,90), descSize);
-        putComb(pg, 698.9, 10.60, 3, rowTop, proc.solic, smallSize);
-      });
-
-      if(totalPages > 1){
-        put(pg, 12, 592, `Página ${p+1}/${totalPages}`, 6.5);
-      }
-    }
-
-    const outBytes = await pdfDoc.save();
-    const blob = new Blob([outBytes], { type: 'application/pdf' });
+    const { bytes, totalPages, filename } = await buildFilledPdf();
+    const blob = new Blob([bytes], { type: 'application/pdf' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    const nomePaciente = (v('f10') || 'Paciente').trim();
-    const hoje = new Date();
-    const dd = String(hoje.getDate()).padStart(2,'0');
-    const mm = String(hoje.getMonth()+1).padStart(2,'0');
-    const yyyy = hoje.getFullYear();
-    const dataStr = `${dd}-${mm}-${yyyy}`;
-    const nomeArquivo = `SADT ${nomePaciente} ${dataStr}`.replace(/[\\/:*?"<>|]+/g,'').replace(/\s+/g,' ').trim();
-    a.download = `${nomeArquivo}.pdf`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -586,7 +594,54 @@ async function generatePdf(){
   }
 }
 
+async function printPdf(){
+  const status = document.getElementById('status');
+  status.textContent = 'Preparando impressão...';
+  try{
+    const { bytes, totalPages } = await buildFilledPdf();
+    const blob = new Blob([bytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+
+    // Abre o PDF num iframe escondido e chama a impressão direto do navegador,
+    // sem precisar baixar o arquivo antes.
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = 'none';
+    iframe.src = url;
+
+    iframe.onload = () => {
+      try{
+        iframe.contentWindow.focus();
+        iframe.contentWindow.print();
+        status.textContent = totalPages > 1
+          ? `Guia com ${totalPages} páginas enviada para impressão.`
+          : 'Guia enviada para impressão.';
+      } catch(printErr){
+        console.error(printErr);
+        // Alguns navegadores (ex.: Safari) bloqueiam print() dentro do iframe;
+        // como alternativa, abre o PDF numa nova aba para imprimir por lá.
+        window.open(url, '_blank');
+        status.textContent = 'Não foi possível abrir a impressão automaticamente — o PDF foi aberto numa nova aba, use o botão de impressão do visualizador.';
+      }
+      setTimeout(()=>{
+        document.body.removeChild(iframe);
+        URL.revokeObjectURL(url);
+      }, 60000);
+    };
+
+    document.body.appendChild(iframe);
+  } catch(err){
+    console.error(err);
+    status.textContent = 'Erro ao preparar impressão: ' + err.message;
+  }
+}
+
 document.getElementById('genBtn').addEventListener('click', generatePdf);
+document.getElementById('printBtn').addEventListener('click', printPdf);
 </script>
 
 </body>
