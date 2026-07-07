@@ -3762,6 +3762,14 @@ async function printPdf(){
     };
 
     iframe.onload = () => {
+      // O iframe dispara "load" duas vezes: uma para o documento em branco inicial
+      // (about:blank), assim que é inserido na página, e outra quando o PDF termina
+      // de carregar. Sem esse filtro, a impressão era chamada também na primeira vez,
+      // abrindo uma página em branco antes da guia correta.
+      let href = '';
+      try { href = iframe.contentWindow.location.href; } catch(e) {}
+      if (!href || href === 'about:blank') return;
+
       try{
         iframe.contentWindow.focus();
         iframe.contentWindow.print();
