@@ -153,6 +153,20 @@ button{
 .btn-clear{background:transparent;color:var(--danger);border:1px solid var(--danger);}
 .btn-clear:hover{background:#fbeceb;}
 
+.atalho-chip{display:flex;align-items:stretch;border-radius:8px;overflow:hidden;}
+.atalho-chip button.atalho-apply{
+  background:#e4efed;color:var(--accent-dark);border:none;
+  padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;
+  border-radius:8px 0 0 8px;
+}
+.atalho-chip button.atalho-apply:hover{background:#d5e7e3;}
+.atalho-chip button.atalho-del{
+  background:#f3d9d6;color:var(--danger);border:none;
+  padding:9px 10px;font-size:13px;font-weight:700;cursor:pointer;
+  border-radius:0 8px 8px 0;
+}
+.atalho-chip button.atalho-del:hover{background:#eccac6;}
+
 .note{
   font-size:12px;color:var(--ink-soft);
   background:#fef7ec;border:1px solid #f0dcb0;
@@ -228,6 +242,18 @@ button{
     <h2>Dados do Contratado Solicitante</h2>
     <div class="note" style="margin-top:0;">
       Profissional solicitante fixo: <strong>Luiz Filipe Alkamin Woellner</strong> · Conselho Profissional 06 (CRM) · Nº 42978 · UF PR · CBO 225203.
+    </div>
+  </div>
+
+  <div class="section" id="atalhosSection">
+    <h2>Atalhos rápidos</h2>
+    <div class="note" style="margin-bottom:12px;">Clique num atalho para preencher a indicação clínica e os procedimentos automaticamente. Use "+ Salvar atalho" para guardar o que estiver preenchido agora no formulário como um novo atalho (fica salvo neste navegador). Use exportar/importar para levar os atalhos de um computador para outro.</div>
+    <div id="atalhosList" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;"></div>
+    <div class="btnbar">
+      <button class="btn-add" id="addAtalho" type="button">+ Salvar atalho com os dados atuais</button>
+      <button class="btn-add" id="exportAtalhos" type="button">Exportar atalhos (.json)</button>
+      <button class="btn-add" id="importAtalhosBtn" type="button">Importar atalhos</button>
+      <input type="file" id="importAtalhosInput" accept="application/json,.json" style="display:none;">
     </div>
   </div>
 
@@ -2372,6 +2398,202 @@ document.getElementById('clearProcs').addEventListener('click', ()=>{
     });
   }
 });
+
+// ---------- Atalhos rápidos ----------
+const ATALHOS_KEY = 'sadt_atalhos_v1';
+const ATALHOS_PADRAO = [
+  {
+    id: 'padrao-doppler-mmii-varizes',
+    nome: 'Doppler Venoso MMII (Varizes)',
+    indicacao: 'MAPEAMENTO VENOSO DE MMII BILATERAL (VARIZES)',
+    procedimentos: [
+      { tabela: '22', codigo: '40901483', desc: 'Doppler colorido venoso de membro inferior - unilateral', qtd: '2' }
+    ]
+  }
+];
+
+function carregarAtalhos(){
+  try{
+    const raw = localStorage.getItem(ATALHOS_KEY);
+    if(!raw) return ATALHOS_PADRAO.slice();
+    const parsed = JSON.parse(raw);
+    return (Array.isArray(parsed) && parsed.length) ? parsed : ATALHOS_PADRAO.slice();
+  } catch(e){
+    return ATALHOS_PADRAO.slice();
+  }
+}
+
+function salvarAtalhos(lista){
+  try{ localStorage.setItem(ATALHOS_KEY, JSON.stringify(lista)); }
+  catch(e){ console.error('Não foi possível salvar atalhos:', e); }
+}
+
+let atalhos = carregarAtalhos();
+
+function renderAtalhos(){
+  const cont = document.getElementById('atalhosList');
+  cont.innerHTML = '';
+  if(!atalhos.length){
+    const vazio = document.createElement('div');
+    vazio.className = 'note';
+    vazio.style.margin = '0';
+    vazio.textContent = 'Nenhum atalho salvo ainda.';
+    cont.appendChild(vazio);
+    return;
+  }
+  atalhos.forEach((atalho, idx)=>{
+    const chip = document.createElement('div');
+    chip.className = 'atalho-chip';
+
+    const applyBtn = document.createElement('button');
+    applyBtn.type = 'button';
+    applyBtn.className = 'atalho-apply';
+    applyBtn.textContent = atalho.nome;
+    applyBtn.title = atalho.indicacao || '';
+    applyBtn.addEventListener('click', ()=> aplicarAtalho(atalho));
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'atalho-del';
+    delBtn.textContent = '×';
+    delBtn.title = 'Remover atalho';
+    delBtn.addEventListener('click', ()=>{
+      if(confirm(`Remover o atalho "${atalho.nome}"?`)){
+        atalhos.splice(idx,1);
+        salvarAtalhos(atalhos);
+        renderAtalhos();
+      }
+    });
+
+    chip.appendChild(applyBtn);
+    chip.appendChild(delBtn);
+    cont.appendChild(chip);
+  });
+}
+
+function proximoSlotVazio(){
+  for(let n=1;n<=procCount;n++){
+    const codigoEl = document.getElementById(`pr${n}_codigo`);
+    const descEl = document.getElementById(`pr${n}_desc`);
+    if(codigoEl && !codigoEl.value && descEl && !descEl.value) return n;
+  }
+  addProcRow();
+  return procCount;
+}
+
+function aplicarAtalho(atalho){
+  if(atalho.indicacao) document.getElementById('f23').value = atalho.indicacao;
+  (atalho.procedimentos || []).forEach(proc=>{
+    const n = proximoSlotVazio();
+    document.getElementById(`pr${n}_tabela`).value = proc.tabela || '22';
+    document.getElementById(`pr${n}_codigo`).value = proc.codigo || '';
+    document.getElementById(`pr${n}_desc`).value = proc.desc || '';
+    document.getElementById(`pr${n}_solic`).value = proc.qtd || '1';
+    const searchEl = document.getElementById(`pr${n}_search`);
+    if(searchEl) searchEl.value = (proc.codigo && proc.desc) ? `${proc.codigo} \u2014 ${proc.desc}` : '';
+  });
+  document.getElementById('status').textContent = `Atalho "${atalho.nome}" aplicado.`;
+}
+
+document.getElementById('addAtalho').addEventListener('click', ()=>{
+  const nome = prompt('Nome do atalho (ex: "Doppler Venoso MMII - Varizes"):');
+  if(!nome) return;
+  const indicacao = document.getElementById('f23').value.trim();
+  const procedimentos = [];
+  for(let n=1;n<=procCount;n++){
+    const codigoEl = document.getElementById(`pr${n}_codigo`);
+    const descEl = document.getElementById(`pr${n}_desc`);
+    const solicEl = document.getElementById(`pr${n}_solic`);
+    const tabelaEl = document.getElementById(`pr${n}_tabela`);
+    if(codigoEl && codigoEl.value){
+      procedimentos.push({
+        tabela: tabelaEl ? tabelaEl.value : '22',
+        codigo: codigoEl.value,
+        desc: descEl ? descEl.value : '',
+        qtd: solicEl ? solicEl.value : '1'
+      });
+    }
+  }
+  if(!procedimentos.length && !indicacao){
+    alert('Preencha a indicação clínica e/ou pelo menos um procedimento antes de salvar o atalho.');
+    return;
+  }
+  atalhos.push({ id: 'custom-' + Date.now(), nome, indicacao, procedimentos });
+  salvarAtalhos(atalhos);
+  renderAtalhos();
+  document.getElementById('status').textContent = `Atalho "${nome}" salvo.`;
+});
+
+document.getElementById('exportAtalhos').addEventListener('click', ()=>{
+  try{
+    const json = JSON.stringify(atalhos, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'atalhos_sadt.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 5000);
+    document.getElementById('status').textContent = 'Atalhos exportados com sucesso.';
+  } catch(err){
+    console.error(err);
+    document.getElementById('status').textContent = 'Erro ao exportar atalhos: ' + err.message;
+  }
+});
+
+document.getElementById('importAtalhosBtn').addEventListener('click', ()=>{
+  document.getElementById('importAtalhosInput').click();
+});
+
+document.getElementById('importAtalhosInput').addEventListener('change', (e)=>{
+  const file = e.target.files && e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let importados;
+    try{
+      importados = JSON.parse(reader.result);
+      if(!Array.isArray(importados)) throw new Error('O arquivo não contém uma lista de atalhos válida.');
+    } catch(err){
+      console.error(err);
+      alert('Não foi possível ler esse arquivo de atalhos: ' + err.message);
+      e.target.value = '';
+      return;
+    }
+
+    const substituir = confirm(
+      `Encontrados ${importados.length} atalho(s) no arquivo.\n\n` +
+      `Clique OK para SUBSTITUIR os atalhos atuais por esses.\n` +
+      `Clique Cancelar para ADICIONAR esses aos atalhos que já existem.`
+    );
+
+    if(substituir){
+      atalhos = importados;
+    } else {
+      const nomesExistentes = new Set(atalhos.map(a => a.nome));
+      importados.forEach(novo => {
+        if(!nomesExistentes.has(novo.nome)){
+          atalhos.push(novo);
+          nomesExistentes.add(novo.nome);
+        }
+      });
+    }
+    salvarAtalhos(atalhos);
+    renderAtalhos();
+    document.getElementById('status').textContent = 'Atalhos importados com sucesso.';
+    e.target.value = '';
+  };
+  reader.onerror = () => {
+    alert('Erro ao ler o arquivo.');
+    e.target.value = '';
+  };
+  reader.readAsText(file);
+});
+
+renderAtalhos();
+
 
 // ---------- Logos dos convênios em base64 (data URI) ----------
 const LOGOS_CONVENIO = {
